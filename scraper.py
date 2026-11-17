@@ -186,30 +186,22 @@ def parse_thread_list(html: str) -> list[dict[str, str]]:
         return []
 
     items: list[dict[str, str]] = []
-    topic_links = thread_table.select("a.xst[href]")
-    if not topic_links:
-        topic_links = [
-            link
-            for link in thread_table.select("a[href]")
-            if parse_tid(link.get("href", "")) is not None
-        ]
-
-    for topic_link in topic_links:
+    thread_rows = [
+        row
+        for row in thread_table.find_all("li", class_="kmlist", recursive=False)
+        if "common" in row.get("class", [])
+    ]
+    for row in thread_rows:
+        topic_link = row.select_one("a.kmtit[href]")
+        if topic_link is None:
+            continue
         href = topic_link.get("href", "")
         tid = parse_tid(href)
         title = " ".join(topic_link.get_text(" ", strip=True).split())
         if not tid or not title:
             continue
 
-        date_scope = topic_link.find_parent("tr") or topic_link.parent
-        published_at = None
-        for _ in range(6):
-            if date_scope is None or date_scope is thread_table:
-                break
-            published_at = parse_post_date(str(date_scope))
-            if published_at:
-                break
-            date_scope = date_scope.parent
+        published_at = parse_post_date(str(row))
         item = {"tid": tid, "title": title, "href": normalize_url(href)}
         if published_at:
             item["published_at"] = published_at
