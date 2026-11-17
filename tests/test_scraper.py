@@ -370,6 +370,16 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertEqual(get_kwargs["params"]["ajaxtarget"], "fwin_content_login")
         self.assertEqual(kwargs["headers"]["X-Requested-With"], "XMLHttpRequest")
 
+    def test_login_reports_forbidden_login_form_request_before_posting_credentials(self):
+        session = Mock()
+        session.headers = {}
+        session.get.return_value = Mock(status_code=403)
+
+        with self.assertRaisesRegex(RuntimeError, "HTTP 403 before credentials were submitted"):
+            scraper.login_forum(session, "test-user", "test-password")
+
+        session.post.assert_not_called()
+
     def test_login_uses_configured_security_question_id(self):
         session = Mock()
         session.headers = {}

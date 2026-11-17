@@ -120,6 +120,13 @@ def login_forum(
         timeout=30,
         allow_redirects=True,
     )
+    if login_page.status_code == 403:
+        raise RuntimeError(
+            "the forum denied the login-form request with HTTP 403 before credentials were submitted. "
+            "This usually means the forum/CDN is rejecting or rate-limiting GitHub Actions' network; "
+            "it is not evidence that the username or password is wrong. Retry later, or run the workflow "
+            "on a self-hosted runner with network access allowed by the forum."
+        )
     login_page.raise_for_status()
     form_html_match = re.search(r"<!\[CDATA\[(.*?)\]\]>", login_page.text, re.DOTALL)
     form_html = form_html_match.group(1) if form_html_match else login_page.text
