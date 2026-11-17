@@ -13,7 +13,7 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://forum.naixi.net"
-PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&from=space"
+PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&order=dateline&from=space"
 LOGIN_URL = f"{BASE_URL}/member.php"
 DATA_PATH = Path(__file__).resolve().parent / "data" / "posts.json"
 
@@ -192,7 +192,19 @@ def parse_thread_list(html: str) -> list[dict[str, str]]:
         tid = parse_tid(href)
         if not tid:
             continue
-        items.append({"tid": tid, "title": text, "href": normalize_url(href)})
+        published_at = None
+        node = a
+        for _ in range(5):
+            if node is None:
+                break
+            published_at = parse_post_date(str(node))
+            if published_at:
+                break
+            node = node.parent
+        item = {"tid": tid, "title": text, "href": normalize_url(href)}
+        if published_at:
+            item["published_at"] = published_at
+        items.append(item)
     unique: dict[str, dict[str, str]] = {}
     for item in items:
         if item["tid"] not in unique:
@@ -202,21 +214,20 @@ def parse_thread_list(html: str) -> list[dict[str, str]]:
 
 def parse_post_date(html: str) -> str | None:
     patterns = [
-        r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})",
-        r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})",
-        r"(\d{4}年\d{1,2}月\d{1,2}日\s*\d{1,2}:\d{2})",
+        r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?[ T]\d{1,2}:\d{2}:\d{2})",
+        r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?[ T]\d{1,2}:\d{2})",
     ]
     for pattern in patterns:
         match = re.search(pattern, html)
         if match:
-            value = match.group(1)
-            normalized = value.replace("年", "-").replace("月", "-").replace("日", " ")
+            value = match.group(1).replace("T", " ")
+            normalized = value.replace("/", "-").replace("年", "-").replace("月", "-").replace("日", " ")
             normalized = re.sub(r"\s+", " ", normalized)
-            try:
-                return datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%dT%H:%M:%S+08:00")
-            except ValueError:
+            formats = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
+            for date_format in formats:
                 try:
-                    return datetime.strptime(normalized, "%Y-%m-%d %H:%M").strftime("%Y-%m-%dT%H:%M:00+08:00")
+                    date_value = datetime.strptime(normalized, date_format)
+                    return date_value.strftime("%Y-%m-%dT%H:%M:%S+08:00")
                 except ValueError:
                     continue
     return None
@@ -279,12 +290,23 @@ def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> 
                 continue
             thread_url = f"{BASE_URL}/forum.php?mod=viewthread&tid={tid}&extra=page%3D1"
             thread_html = fetch_page(session, thread_url)
+            if is_login_required(thread_html):
+                raise RuntimeError(
+                    f"forum thread {tid} returned a login-required/permission page; "
+                    "the logged-in account cannot access its original post"
+                )
             title, text = parse_post_content(thread_html)
             if not title:
                 title = item["title"]
-            date_value = parse_post_date(thread_html)
+            date_value = parse_post_date(thread_html) or item.get("published_at")
             if not date_value:
-                raise RuntimeError(f"could not find the original forum post time for thread {tid}")
+                page_title = BeautifulSoup(thread_html, "html.parser").title
+                title_text = page_title.get_text(" ", strip=True) if page_title else "(no page title)"
+                raise RuntimeError(
+                    f"could not find the original forum post time for thread {tid} "
+                    f"(response title: {title_text!r}); neither the thread nor its list entry included "
+                    "a recognized timestamp"
+                )
             source_url = thread_url
             posts_by_tid[tid] = {
                 "id": tid,
