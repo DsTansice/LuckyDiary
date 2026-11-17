@@ -50,8 +50,14 @@ def parse_tid(raw_url: str) -> str | None:
 def build_session() -> requests.Session:
     session = requests.Session()
     cookie_value = os.getenv("FORUM_COOKIE", "").strip()
-    if cookie_value:
-        session.headers["Cookie"] = cookie_value
+    if not cookie_value:
+        raise RuntimeError(
+            "FORUM_COOKIE is empty; check that the repository secret is named FORUM_COOKIE "
+            "and is mapped to the Fetch forum posts step"
+        )
+    if cookie_value.lower().startswith("cookie:"):
+        cookie_value = cookie_value.split(":", 1)[1].strip()
+    session.headers["Cookie"] = cookie_value
     return session
 
 
@@ -64,9 +70,15 @@ def fetch_page(session: requests.Session, url: str) -> str:
 
 
 def is_login_required(html: str) -> bool:
-    lower = html.lower()
-    hints = ["登录", "login", "请先登录", "member.php?mod=logging&action=login"]
-    return any(h in lower for h in hints)
+    soup = BeautifulSoup(html, "html.parser")
+    for form in soup.find_all("form"):
+        action = form.get("action", "").lower()
+        has_password_field = form.select_one('input[type="password"]') is not None
+        is_discuz_login = "member.php" in action and "mod=logging" in action
+        is_login_form = form.get("id", "").lower() == "loginform"
+        if has_password_field and (is_discuz_login or is_login_form):
+            return True
+    return False
 
 
 def parse_thread_list(html: str) -> list[dict[str, str]]:
@@ -138,8 +150,17 @@ def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[
     target_url = f"{BASE_URL}{PROFILE_PATH}&page={page_num}"
     page_html = fetch_page(session, target_url)
     if is_login_required(page_html):
-        raise RuntimeError("this forum profile requires login; set FORUM_COOKIE and retry")
-    return parse_thread_list(page_html)
+        raise RuntimeError(
+            "the forum returned its login form; FORUM_COOKIE was sent but may be expired or incorrect. "
+            "Set it to the full Cookie request-header value from a logged-in forum page"
+        )
+    items = parse_thread_list(page_html)
+    if not items and page_num == 1:
+        raise RuntimeError(
+            "no thread links were found on the first profile page; the forum may have rejected the session "
+            "or changed its page layout"
+        )
+    return items
 
 
 def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> list[dict[str, Any]]:
