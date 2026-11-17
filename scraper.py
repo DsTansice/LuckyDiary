@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://forum.naixi.net"
 PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&from=space"
+LOGIN_URL = f"{BASE_URL}/member.php?mod=logging&action=login"
 DATA_PATH = Path(__file__).resolve().parent / "data" / "posts.json"
 
 
@@ -49,16 +50,74 @@ def parse_tid(raw_url: str) -> str | None:
 
 def build_session() -> requests.Session:
     session = requests.Session()
+    session.headers["User-Agent"] = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+    username = os.getenv("FORUM_USERNAME", "").strip()
+    password = os.getenv("FORUM_PASSWORD", "")
+    question_id = os.getenv("FORUM_QUESTION_ID", "")
+    answer = os.getenv("FORUM_ANSWER", "")
+    if username or password:
+        if not username or not password:
+            raise RuntimeError("set both FORUM_USERNAME and FORUM_PASSWORD GitHub secrets")
+        login_forum(session, username, password, question_id, answer)
+        return session
+
     cookie_value = os.getenv("FORUM_COOKIE", "").strip()
     if not cookie_value:
         raise RuntimeError(
-            "FORUM_COOKIE is empty; check that the repository secret is named FORUM_COOKIE "
-            "and is mapped to the Fetch forum posts step"
+            "forum credentials are missing; set FORUM_USERNAME and FORUM_PASSWORD GitHub secrets "
+            "(or provide FORUM_COOKIE as a fallback)"
         )
     if cookie_value.lower().startswith("cookie:"):
         cookie_value = cookie_value.split(":", 1)[1].strip()
     session.headers["Cookie"] = cookie_value
     return session
+
+
+def login_forum(
+    session: requests.Session,
+    username: str,
+    password: str,
+    question_id: str = "",
+    answer: str = "",
+) -> None:
+    login_page = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
+    login_page.raise_for_status()
+    soup = BeautifulSoup(login_page.text, "html.parser")
+    form = soup.select_one("form[id^='loginform']")
+    if form is None:
+        raise RuntimeError("could not find the forum login form; the login page layout may have changed")
+
+    action = form.get("action")
+    if not action:
+        raise RuntimeError("the forum login form has no action URL")
+
+    form_data: dict[str, str] = {}
+    for field in form.select("input[type='hidden'][name]"):
+        form_data[field["name"]] = field.get("value", "")
+    question_select = form.select_one("select[name='questionid']")
+    if question_select is not None:
+        selected_option = question_select.select_one("option[selected]") or question_select.select_one("option")
+        form_data["questionid"] = question_id or (
+            selected_option.get("value", "") if selected_option is not None else ""
+        )
+    elif question_id:
+        form_data["questionid"] = question_id
+    form_data["username"] = username
+    form_data["password"] = password
+    if form.select_one("input[name='answer']") is not None:
+        form_data["answer"] = answer
+
+    response = session.post(
+        urljoin(login_page.url, action),
+        data=form_data,
+        headers={"Referer": login_page.url},
+        timeout=30,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
 
 
 def fetch_page(session: requests.Session, url: str) -> str:
@@ -71,6 +130,9 @@ def fetch_page(session: requests.Session, url: str) -> str:
 
 def is_login_required(html: str) -> bool:
     soup = BeautifulSoup(html, "html.parser")
+    visible_text = "".join(soup.stripped_strings)
+    if "请先登录后才能继续浏览" in visible_text:
+        return True
     for form in soup.find_all("form"):
         action = form.get("action", "").lower()
         has_password_field = form.select_one('input[type="password"]') is not None
@@ -151,8 +213,9 @@ def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[
     page_html = fetch_page(session, target_url)
     if is_login_required(page_html):
         raise RuntimeError(
-            "the forum returned its login form; FORUM_COOKIE was sent but may be expired or incorrect. "
-            "Set it to the full Cookie request-header value from a logged-in forum page"
+            "the forum returned a login-required page after authentication. Check FORUM_USERNAME and "
+            "FORUM_PASSWORD, and set FORUM_ANSWER if the account requires a security-question answer. "
+            "If using FORUM_COOKIE instead, refresh it from a currently logged-in forum request."
         )
     items = parse_thread_list(page_html)
     if not items and page_num == 1:

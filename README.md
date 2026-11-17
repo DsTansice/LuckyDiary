@@ -5,9 +5,10 @@
 ## GitHub Actions 登录配置
 
 1. 在 GitHub 仓库打开 **Settings → Secrets and variables → Actions → New repository secret**。
-2. Name 填 `FORUM_COOKIE`，Secret 填从浏览器开发者工具 Network 请求头复制的完整 `Cookie` 值。
-3. 不要把 Cookie 提交到仓库、写入 workflow 文件或贴到聊天中。Cookie 等同于账号登录凭据；如已泄露，请退出论坛并重新登录以更新会话。
-4. 打开 **Actions → Update forum diary → Run workflow** 手动同步。Workflow 将 Cookie 作为 `FORUM_COOKIE` 环境变量传给抓取脚本。
+2. 添加 `FORUM_USERNAME` 和 `FORUM_PASSWORD` 两个 Secrets，分别填写论坛用户名和密码。如果账号登录需要安全问题，添加 `FORUM_QUESTION_ID`（登录表单中对应问题的 ID）和 `FORUM_ANSWER`。无安全问题时可以不设置这两个值，脚本会选表单默认的“无”。
+3. 不要把用户名、密码、安全问题答案或 Cookie 提交到仓库或贴到聊天中。它们都是账号凭据。
+4. 打开 **Actions → Update forum diary → Run workflow** 手动同步。Workflow 会将 Secrets 作为环境变量传给抓取步骤，先读取论坛动态登录表单，再执行登录。脚本只复用登录后的会话来抓帖子，不会执行 HAR 中的签到请求。
+5. 也可以不配置账号密码，改为配置 `FORUM_COOKIE` Secret，作为登录 Cookie 的回退方式。
 
 脚本会扫描个人帖子列表前 10 页，只抓取尚未存档的帖子。已有存档内容保持不变；若无法读取原帖的论坛时间，任务会报错而不是用抓取时间替代。
 
