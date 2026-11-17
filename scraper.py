@@ -213,6 +213,20 @@ def parse_thread_list(html: str) -> list[dict[str, str]]:
 
 
 def parse_post_date(html: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    postlist = soup.select_one("#postlist, .postlist")
+    first_post = None
+    if postlist is not None:
+        first_post = postlist.select_one("div.comiis_vpost[id^='post_'], div[id^='post_']")
+
+    date_scope = first_post or postlist or soup
+    for date_node in date_scope.select("em[id^='authorposton'] span[title], time[datetime]"):
+        value = date_node.get("title") or date_node.get("datetime")
+        if value:
+            parsed = parse_absolute_date(value)
+            if parsed:
+                return parsed
+
     patterns = [
         r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?[ T]\d{1,2}:\d{2}:\d{2})",
         r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?[ T]\d{1,2}:\d{2})",
@@ -223,35 +237,47 @@ def parse_post_date(html: str) -> str | None:
             value = match.group(1).replace("T", " ")
             normalized = value.replace("/", "-").replace("年", "-").replace("月", "-").replace("日", " ")
             normalized = re.sub(r"\s+", " ", normalized)
-            formats = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
-            for date_format in formats:
-                try:
-                    date_value = datetime.strptime(normalized, date_format)
-                    return date_value.strftime("%Y-%m-%dT%H:%M:%S+08:00")
-                except ValueError:
-                    continue
+            parsed = parse_absolute_date(normalized)
+            if parsed:
+                return parsed
+    return None
+
+
+def parse_absolute_date(value: str) -> str | None:
+    normalized = value.strip().replace("/", "-").replace("年", "-").replace("月", "-").replace("日", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    for date_format in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            date_value = datetime.strptime(normalized, date_format)
+            return date_value.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        except ValueError:
+            continue
     return None
 
 
 def parse_post_content(html: str) -> tuple[str, str]:
     soup = BeautifulSoup(html, "html.parser")
-    title_tag = soup.select_one("title")
-    if title_tag:
-        title = " ".join(title_tag.get_text(" ", strip=True).split())
-    else:
-        title = ""
+    title_node = soup.select_one("#thread_subject")
+    if title_node is None:
+        title_node = soup.select_one("h1.ts, title")
+    title = " ".join(title_node.get_text(" ", strip=True).split()) if title_node else ""
 
-    containers = soup.select("div.t_fsz, div.t_f, div.postcontent, div.pcb, div.t_msgfont")
-    if not containers:
-        containers = soup.select("td.t_f, div#postlist div")
-    content_html = ""
-    for container in containers:
-        cleaned = container.decode_contents() if hasattr(container, "decode_contents") else str(container)
-        if cleaned.strip():
-            content_html = cleaned
-            break
+    postlist = soup.select_one("#postlist, .postlist")
+    first_post = None
+    if postlist is not None:
+        first_post = postlist.select_one("div.comiis_vpost[id^='post_'], div[id^='post_']")
 
-    text = BeautifulSoup(content_html or html, "html.parser").get_text("\n", strip=True)
+    scope = first_post or postlist or soup
+    content = scope.select_one(".t_f, .t_fsz, .postcontent, .t_msgfont")
+    if content is None:
+        content = scope.select_one(".pcb")
+    if content is None:
+        content = scope
+
+    for unwanted in content.select(".attach_tips, .pstatus"):
+        unwanted.decompose()
+    text = content.get_text("\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return title, text
 
 
@@ -288,16 +314,17 @@ def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> 
             tid = item["tid"]
             if tid in posts_by_tid or tid in existing_ids:
                 continue
-            thread_url = f"{BASE_URL}/forum.php?mod=viewthread&tid={tid}&extra=page%3D1"
+            thread_url = item["href"]
             thread_html = fetch_page(session, thread_url)
             if is_login_required(thread_html):
                 raise RuntimeError(
                     f"forum thread {tid} returned a login-required/permission page; "
                     "the logged-in account cannot access its original post"
                 )
-            title, text = parse_post_content(thread_html)
+            thread_title, text = parse_post_content(thread_html)
+            title = item["title"] or thread_title
             if not title:
-                title = item["title"]
+                title = thread_title
             date_value = parse_post_date(thread_html) or item.get("published_at")
             if not date_value:
                 page_title = BeautifulSoup(thread_html, "html.parser").title
