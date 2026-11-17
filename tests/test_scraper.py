@@ -28,6 +28,15 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertIn("order=dateline", scraper.PROFILE_PATH)
         self.assertTrue(scraper.PROFILE_PATH.endswith("&from=space"))
 
+    def test_initial_sync_scans_ten_pages(self):
+        self.assertEqual(scraper.page_limit_for_archive([]), 10)
+
+    def test_incremental_sync_scans_one_page(self):
+        self.assertEqual(
+            scraper.page_limit_for_archive([{"id": "16529"}]),
+            1,
+        )
+
     def test_thread_list_entry_date_is_extracted(self):
         html = """
           <div class="thread">

@@ -354,14 +354,19 @@ def merge_posts(existing: list[dict[str, Any]], new_posts: list[dict[str, Any]])
     return sorted(merged.values(), key=lambda x: x.get("published_at", "1970-01-01T00:00:00+00:00"), reverse=True)
 
 
+def page_limit_for_archive(existing_posts: list[dict[str, Any]]) -> int:
+    return 1 if existing_posts else 10
+
+
 def main() -> None:
     current = load_existing()
     existing_posts = current.get("posts", [])
     existing_ids = {str(post["id"]) for post in existing_posts}
-    new_posts = crawl_forum(limit_pages=10, existing_ids=existing_ids)
+    page_limit = page_limit_for_archive(existing_posts)
+    new_posts = crawl_forum(limit_pages=page_limit, existing_ids=existing_ids)
     posts = merge_posts(existing_posts, new_posts)
     save_posts(posts)
-    print(f"saved {len(posts)} posts")
+    print(f"saved {len(posts)} posts (scanned {page_limit} page(s))")
 
 
 if __name__ == "__main__":
