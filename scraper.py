@@ -7,14 +7,14 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse, urljoin
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://forum.naixi.net"
 PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&from=space"
-LOGIN_URL = f"{BASE_URL}/member.php?mod=logging&action=login"
+LOGIN_URL = f"{BASE_URL}/member.php"
 DATA_PATH = Path(__file__).resolve().parent / "data" / "posts.json"
 
 
@@ -41,10 +41,9 @@ def parse_tid(raw_url: str) -> str | None:
     query = parse_qs(parsed.query)
     if "tid" in query:
         return query["tid"][0]
-    if "mod=viewthread" in raw_url and "tid=" in raw_url:
-        match = re.search(r"tid=(\d+)", raw_url)
-        if match:
-            return match.group(1)
+    match = re.search(r"(?:^|/)thread-(\d+)(?:-\d+-\d+)?\.html(?:$|[?#])", parsed.path)
+    if match:
+        return match.group(1)
     return None
 
 
@@ -83,16 +82,43 @@ def login_forum(
     question_id: str = "",
     answer: str = "",
 ) -> None:
-    login_page = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
+    login_page = session.get(
+        LOGIN_URL,
+        params={
+            "mod": "logging",
+            "action": "login",
+            "infloat": "yes",
+            "handlekey": "login",
+            "inajax": "1",
+            "ajaxtarget": "fwin_content_login",
+        },
+        headers={
+            "Referer": f"{BASE_URL}/",
+            "X-Requested-With": "XMLHttpRequest",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
     login_page.raise_for_status()
-    soup = BeautifulSoup(login_page.text, "html.parser")
+    form_html_match = re.search(r"<!\[CDATA\[(.*?)\]\]>", login_page.text, re.DOTALL)
+    form_html = form_html_match.group(1) if form_html_match else login_page.text
+    soup = BeautifulSoup(form_html, "html.parser")
     form = soup.select_one("form[id^='loginform']")
     if form is None:
-        raise RuntimeError("could not find the forum login form; the login page layout may have changed")
+        raise RuntimeError("the forum AJAX login response did not contain a login form")
 
     action = form.get("action")
     if not action:
         raise RuntimeError("the forum login form has no action URL")
+    post_url = urljoin(login_page.url, action)
+    parsed_url = urlsplit(post_url)
+    query = dict(parse_qsl(parsed_url.query, keep_blank_values=True))
+    query.setdefault("loginsubmit", "yes")
+    query.setdefault("handlekey", "login")
+    query["inajax"] = "1"
+    post_url = urlunsplit(
+        (parsed_url.scheme, parsed_url.netloc, parsed_url.path, urlencode(query), parsed_url.fragment)
+    )
 
     form_data: dict[str, str] = {}
     for field in form.select("input[type='hidden'][name]"):
@@ -111,13 +137,23 @@ def login_forum(
         form_data["answer"] = answer
 
     response = session.post(
-        urljoin(login_page.url, action),
+        post_url,
         data=form_data,
-        headers={"Referer": login_page.url},
+        headers={
+            "Referer": login_page.url,
+            "X-Requested-With": "XMLHttpRequest",
+        },
         timeout=30,
         allow_redirects=True,
     )
     response.raise_for_status()
+    if "登录失败" in response.text:
+        raise RuntimeError("the forum rejected the login; check the GitHub username/password/security-answer secrets")
+    if "欢迎您回来" not in response.text:
+        raise RuntimeError(
+            "the forum login response did not confirm success. Check the credentials and optional "
+            "FORUM_QUESTION_ID/FORUM_ANSWER secrets against the login form"
+        )
 
 
 def fetch_page(session: requests.Session, url: str) -> str:
@@ -146,7 +182,7 @@ def is_login_required(html: str) -> bool:
 def parse_thread_list(html: str) -> list[dict[str, str]]:
     soup = BeautifulSoup(html, "html.parser")
     items: list[dict[str, str]] = []
-    for a in soup.select("a[href*='tid='], a[href*='mod=viewthread']"):
+    for a in soup.select("a[href*='tid='], a[href*='mod=viewthread'], a[href*='thread-']"):
         href = a.get("href", "")
         if not href:
             continue
@@ -219,9 +255,12 @@ def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[
         )
     items = parse_thread_list(page_html)
     if not items and page_num == 1:
+        soup = BeautifulSoup(page_html, "html.parser")
+        page_title = soup.title.get_text(" ", strip=True) if soup.title else "(no page title)"
         raise RuntimeError(
-            "no thread links were found on the first profile page; the forum may have rejected the session "
-            "or changed its page layout"
+            "no thread links were found on the first profile page "
+            f"(response title: {page_title!r}); authentication may have failed or the forum's thread-link "
+            "format may have changed"
         )
     return items
 
