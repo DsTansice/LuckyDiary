@@ -3,7 +3,7 @@ name: Update forum diary
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 3 15 * *'
+    - cron: '0 3 * * *'
 
 jobs:
   sync:
@@ -23,6 +23,10 @@ jobs:
       - name: Fetch forum posts
         run: python scraper.py
         env:
+          FORUM_USERNAME: ${{ secrets.FORUM_USERNAME }}
+          FORUM_PASSWORD: ${{ secrets.FORUM_PASSWORD }}
+          FORUM_QUESTION_ID: ${{ secrets.FORUM_QUESTION_ID }}
+          FORUM_ANSWER: ${{ secrets.FORUM_ANSWER }}
           FORUM_COOKIE: ${{ secrets.FORUM_COOKIE }}
 
       - name: Build static site
