@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ BASE_URL = "https://forum.naixi.net"
 PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&order=dateline&from=space"
 LOGIN_URL = f"{BASE_URL}/member.php"
 DATA_PATH = Path(__file__).resolve().parent / "data" / "posts.json"
+MAX_FETCH_ATTEMPTS = 3
 
 
 def load_existing() -> dict[str, Any]:
@@ -157,7 +159,19 @@ def login_forum(
 
 
 def fetch_page(session: requests.Session, url: str) -> str:
-    response = session.get(url, timeout=30, allow_redirects=True)
+    for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
+        try:
+            response = session.get(url, timeout=30, allow_redirects=True)
+            break
+        except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError):
+            if attempt == MAX_FETCH_ATTEMPTS:
+                raise
+            delay = attempt
+            print(
+                f"warning: temporary connection error fetching {url}; "
+                f"retrying in {delay}s ({attempt + 1}/{MAX_FETCH_ATTEMPTS})"
+            )
+            time.sleep(delay)
     if response.status_code in (403, 401):
         raise RuntimeError(f"forum access forbidden for {url}; set FORUM_COOKIE with a valid auth cookie")
     response.raise_for_status()

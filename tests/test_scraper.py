@@ -9,6 +9,31 @@ import scraper
 
 
 class LoginDetectionTests(unittest.TestCase):
+    def test_fetch_page_retries_chunked_response_then_succeeds(self):
+        session = Mock()
+        response = Mock(status_code=200, text="<html>ok</html>")
+        session.get.side_effect = [
+            requests.exceptions.ChunkedEncodingError("Response ended prematurely"),
+            response,
+        ]
+        with patch.object(scraper.time, "sleep"):
+            result = scraper.fetch_page(session, "https://forum.naixi.net/thread-16529-1-1.html")
+
+        self.assertEqual(result, "<html>ok</html>")
+        self.assertEqual(session.get.call_count, 2)
+
+    def test_fetch_page_raises_after_chunked_response_retries_are_exhausted(self):
+        session = Mock()
+        error = requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+        session.get.side_effect = error
+        with patch.object(scraper.time, "sleep") as sleep, self.assertRaises(
+            requests.exceptions.ChunkedEncodingError
+        ):
+            scraper.fetch_page(session, "https://forum.naixi.net/thread-16529-1-1.html")
+
+        self.assertEqual(session.get.call_count, scraper.MAX_FETCH_ATTEMPTS)
+        self.assertEqual(sleep.call_count, scraper.MAX_FETCH_ATTEMPTS - 1)
+
     def test_navigation_login_link_does_not_mean_session_is_logged_out(self):
         html = """
         <html>
