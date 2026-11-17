@@ -186,27 +186,30 @@ def parse_thread_list(html: str) -> list[dict[str, str]]:
         return []
 
     items: list[dict[str, str]] = []
-    for row in thread_table.select("tr"):
-        topic_link = row.select_one("th.common a.xst[href], a.xst[href]")
-        if topic_link is None:
-            topic_link = next(
-                (
-                    link
-                    for link in row.select("a[href]")
-                    if parse_tid(link.get("href", "")) is not None
-                ),
-                None,
-            )
-        if topic_link is None:
-            continue
+    topic_links = thread_table.select("a.xst[href]")
+    if not topic_links:
+        topic_links = [
+            link
+            for link in thread_table.select("a[href]")
+            if parse_tid(link.get("href", "")) is not None
+        ]
 
+    for topic_link in topic_links:
         href = topic_link.get("href", "")
         tid = parse_tid(href)
         title = " ".join(topic_link.get_text(" ", strip=True).split())
         if not tid or not title:
             continue
 
-        published_at = parse_post_date(str(row))
+        date_scope = topic_link.find_parent("tr") or topic_link.parent
+        published_at = None
+        for _ in range(6):
+            if date_scope is None or date_scope is thread_table:
+                break
+            published_at = parse_post_date(str(date_scope))
+            if published_at:
+                break
+            date_scope = date_scope.parent
         item = {"tid": tid, "title": title, "href": normalize_url(href)}
         if published_at:
             item["published_at"] = published_at
@@ -300,10 +303,14 @@ def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[
     if not items and page_num == 1:
         soup = BeautifulSoup(page_html, "html.parser")
         page_title = soup.title.get_text(" ", strip=True) if soup.title else "(no page title)"
+        has_thread_table = soup.select_one("#threadlisttableid") is not None
+        thread_link_count = (
+            len(soup.select("#threadlisttableid a[href]")) if has_thread_table else 0
+        )
         raise RuntimeError(
-            "no thread rows were found in #threadlisttableid on the first profile page "
-            f"(response title: {page_title!r}); authentication may have failed or the forum's thread-link "
-            "format may have changed"
+            "could not extract topic links from the first profile page "
+            f"(response title: {page_title!r}, #threadlisttableid present: {has_thread_table}, "
+            f"links inside it: {thread_link_count}); the table markup may differ from the expected format"
         )
     return items
 
