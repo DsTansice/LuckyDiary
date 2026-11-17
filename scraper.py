@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import time
@@ -17,8 +18,25 @@ BASE_URL = "https://forum.naixi.net"
 PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&order=dateline&from=space"
 LOGIN_URL = f"{BASE_URL}/member.php"
 DATA_PATH = Path(__file__).resolve().parent / "data" / "posts.json"
+IMAGE_DIR = Path(__file__).resolve().parent / "data" / "images"
 MAX_FETCH_ATTEMPTS = 3
 HONG_KONG_TZ = timezone(timedelta(hours=8))
+POST_CONTENT_VERSION = 1
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+IMAGE_CONTENT_TYPES = {
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+ALLOWED_POST_TAGS = {
+    "a", "b", "blockquote", "br", "center", "code", "del", "div", "em", "font", "h1", "h2",
+    "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre",
+    "s", "span", "strong", "sub", "sup", "table", "tbody", "td", "th",
+    "thead", "tr", "u", "ul",
+}
 
 
 def load_existing() -> dict[str, Any]:
@@ -318,7 +336,34 @@ def parse_relative_date(value: str, now: datetime | None = None) -> str | None:
     return None
 
 
-def parse_post_content(html: str) -> tuple[str, str]:
+def sanitize_inline_style(style: str) -> str:
+    allowed_properties = {
+        "background-color",
+        "color",
+        "font-family",
+        "font-size",
+        "font-style",
+        "font-weight",
+        "text-align",
+        "text-decoration",
+        "vertical-align",
+    }
+    declarations = []
+    for declaration in style.split(";"):
+        if ":" not in declaration:
+            continue
+        property_name, value = (part.strip() for part in declaration.split(":", 1))
+        property_name = property_name.lower()
+        value = value.strip()
+        if property_name not in allowed_properties or not value:
+            continue
+        if re.search(r"url\s*\(|expression\s*\(|[<>]", value, re.IGNORECASE):
+            continue
+        declarations.append(f"{property_name}: {value}")
+    return "; ".join(declarations)
+
+
+def parse_post_html(html: str) -> tuple[str, str, str]:
     soup = BeautifulSoup(html, "html.parser")
     title_node = soup.select_one("#thread_subject")
     if title_node is None:
@@ -342,24 +387,132 @@ def parse_post_content(html: str) -> tuple[str, str]:
     body = BeautifulSoup(str(content), "html.parser")
     for unwanted in body.select(
         ".attach_tips, .pstatus, .kmbtn, .pob, .po, .fastre, .replysubmit, "
-        "button, input, textarea, select, script, style"
+        "button, input, textarea, select, script, style, iframe, object, embed, form"
     ):
         unwanted.decompose()
     body_node = body.find()
     if body_node is None:
         raise RuntimeError("could not parse the original post body")
-    for line_break in body_node.select("br"):
-        line_break.replace_with("\n")
-    for block in body_node.select("p, div, li, blockquote, pre"):
-        block.insert_before("\n")
-        block.insert_after("\n")
+    for node in list(body_node.find_all(True)):
+        if node.name not in ALLOWED_POST_TAGS:
+            node.unwrap()
+            continue
+        allowed_attributes = {
+            "a": {"href", "title"},
+            "font": {"color", "face", "size"},
+            "img": {"src", "alt", "title", "width", "height", "zoomfile", "file", "data-src"},
+            "td": {"colspan", "rowspan"},
+            "th": {"colspan", "rowspan"},
+        }.get(node.name, set())
+        for attribute in list(node.attrs):
+            if attribute not in allowed_attributes:
+                if attribute == "style":
+                    safe_style = sanitize_inline_style(str(node[attribute]))
+                    if safe_style:
+                        node[attribute] = safe_style
+                    else:
+                        del node[attribute]
+                else:
+                    del node[attribute]
+        if node.name == "a":
+            href = node.get("href", "")
+            normalized_href = re.sub(r"[\x00-\x20]+", "", href).lower()
+            if urlparse(normalized_href).scheme not in ("", "http", "https", "mailto"):
+                del node["href"]
+        if node.name == "img":
+            image_url = next(
+                (
+                    node.get(attribute)
+                    for attribute in ("zoomfile", "file", "data-src", "src")
+                    if node.get(attribute)
+                ),
+                None,
+            )
+            for attribute in ("zoomfile", "file", "data-src"):
+                node.attrs.pop(attribute, None)
+            if image_url:
+                if urlparse(image_url.strip()).scheme.lower() in ("", "http", "https"):
+                    node["src"] = image_url
+                else:
+                    node.attrs.pop("src", None)
+
+    body_html = "".join(str(child) for child in body_node.contents).strip()
     text = body_node.get_text(" ", strip=True)
-    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"(?m)^\s*本主题由.*?移动\s*$", "", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
     if not text:
         raise RuntimeError("the original post body is empty after removing forum controls")
+    return title, text, body_html
+
+
+def parse_post_content(html: str) -> tuple[str, str]:
+    title, text, _ = parse_post_html(html)
     return title, text
+
+
+def download_post_images(
+    content_html: str,
+    tid: str,
+    session: requests.Session,
+    thread_url: str,
+) -> str:
+    soup = BeautifulSoup(content_html, "html.parser")
+    for image in soup.select("img[src]"):
+        image_url = urljoin(thread_url, image["src"])
+        if urlparse(image_url).scheme.lower() not in ("http", "https"):
+            continue
+        image_hash = hashlib.sha256(image_url.encode("utf-8")).hexdigest()[:20]
+        try:
+            response = session.get(image_url, timeout=30, allow_redirects=True)
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            extension = IMAGE_CONTENT_TYPES.get(content_type)
+            if extension is None:
+                raise ValueError(f"unsupported image content type {content_type or '(missing)'}")
+            if len(response.content) > MAX_IMAGE_BYTES:
+                raise ValueError(f"image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+        except (requests.RequestException, ValueError) as error:
+            print(f"warning: could not download image for thread {tid} from {image_url}: {error}")
+            image["src"] = image_url
+            continue
+
+        image_path = IMAGE_DIR / tid / f"{image_hash}{extension}"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        if not image_path.exists():
+            image_path.write_bytes(response.content)
+        image["src"] = f"images/{tid}/{image_hash}{extension}"
+    return "".join(str(child) for child in soup.contents)
+
+
+def make_post_record(
+    tid: str,
+    thread_url: str,
+    thread_html: str,
+    session: requests.Session,
+    fallback_date: str | None = None,
+    fallback_title: str = "",
+) -> dict[str, Any]:
+    thread_title, text, body_html = parse_post_html(thread_html)
+    title = fallback_title or thread_title
+    date_value = parse_post_date(thread_html) or fallback_date
+    if not date_value:
+        page_title = BeautifulSoup(thread_html, "html.parser").title
+        title_text = page_title.get_text(" ", strip=True) if page_title else "(no page title)"
+        raise RuntimeError(
+            f"could not find the original forum post time for thread {tid} "
+            f"(response title: {title_text!r}); neither the thread nor its list entry included "
+            "a recognized timestamp"
+        )
+    body_html = download_post_images(body_html, tid, session, thread_url)
+    return {
+        "id": tid,
+        "source_url": thread_url,
+        "title": title,
+        "published_at": date_value,
+        "excerpt": text[:240],
+        "content": text,
+        "content_html": body_html,
+        "content_format_version": POST_CONTENT_VERSION,
+    }
 
 
 def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[str, str]]:
@@ -390,53 +543,83 @@ def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[
 def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> list[dict[str, Any]]:
     session = build_session()
     existing_ids = existing_ids or set()
+    existing_posts = {str(post["id"]): post for post in load_existing().get("posts", [])}
     posts_by_tid: dict[str, dict[str, Any]] = {}
+    attempted_ids: set[str] = set()
     skipped_not_found = 0
+
+    def fetch_record(
+        tid: str,
+        thread_url: str,
+        fallback_date: str | None = None,
+        fallback_title: str = "",
+    ) -> dict[str, Any] | None:
+        nonlocal skipped_not_found
+        attempted_ids.add(tid)
+        try:
+            thread_html = fetch_page(session, thread_url)
+        except requests.HTTPError as error:
+            if error.response is None or error.response.status_code != 404:
+                raise
+            skipped_not_found += 1
+            print(f"warning: skipping unavailable forum thread {tid} (HTTP 404): {thread_url}")
+            return None
+        if is_login_required(thread_html):
+            raise RuntimeError(
+                f"forum thread {tid} returned a login-required/permission page; "
+                "the logged-in account cannot access its original post"
+            )
+        return make_post_record(
+            tid, thread_url, thread_html, session, fallback_date=fallback_date, fallback_title=fallback_title
+        )
+
     for page in range(1, limit_pages + 1):
         items = fetch_posts_for_page(session, page)
         if not items:
             break
         for item in items:
             tid = item["tid"]
-            if tid in posts_by_tid or tid in existing_ids:
+            if tid in posts_by_tid:
+                continue
+            existing_post = existing_posts.get(tid)
+            needs_rich_content = (
+                existing_post is not None
+                and existing_post.get("content_format_version") != POST_CONTENT_VERSION
+            )
+            if tid in existing_ids and not needs_rich_content:
                 continue
             thread_url = item["href"]
-            try:
-                thread_html = fetch_page(session, thread_url)
-            except requests.HTTPError as error:
-                if error.response is None or error.response.status_code != 404:
-                    raise
-                skipped_not_found += 1
-                print(f"warning: skipping unavailable forum thread {tid} (HTTP 404): {thread_url}")
-                continue
-            if is_login_required(thread_html):
-                raise RuntimeError(
-                    f"forum thread {tid} returned a login-required/permission page; "
-                    "the logged-in account cannot access its original post"
-                )
-            thread_title, text = parse_post_content(thread_html)
-            title = item["title"] or thread_title
-            if not title:
-                title = thread_title
-            date_value = parse_post_date(thread_html) or item.get("published_at")
-            if not date_value:
-                page_title = BeautifulSoup(thread_html, "html.parser").title
-                title_text = page_title.get_text(" ", strip=True) if page_title else "(no page title)"
-                raise RuntimeError(
-                    f"could not find the original forum post time for thread {tid} "
-                    f"(response title: {title_text!r}); neither the thread nor its list entry included "
-                    "a recognized timestamp"
-                )
-            source_url = thread_url
-            posts_by_tid[tid] = {
-                "id": tid,
-                "source_url": source_url,
-                "title": title,
-                "published_at": date_value,
-                "excerpt": text[:240],
-                "content": text,
-                "content_html": BeautifulSoup(thread_html, "html.parser").get_text("\n", strip=True),
-            }
+            record = fetch_record(
+                tid,
+                thread_url,
+                fallback_date=item.get("published_at") or (
+                    existing_post.get("published_at") if existing_post else None
+                ),
+                fallback_title=item.get("title", ""),
+            )
+            if record:
+                posts_by_tid[tid] = record
+
+    for tid, existing_post in existing_posts.items():
+        if (
+            tid in posts_by_tid
+            or tid in attempted_ids
+            or existing_post.get("content_format_version") == POST_CONTENT_VERSION
+        ):
+            continue
+        thread_url = existing_post.get("source_url", "")
+        parsed_url = urlparse(thread_url)
+        if parsed_url.scheme not in ("http", "https") or parsed_url.hostname != urlparse(BASE_URL).hostname:
+            raise RuntimeError(f"archived post {tid} has an invalid source URL: {thread_url!r}")
+        record = fetch_record(
+            tid,
+            thread_url,
+            fallback_date=existing_post.get("published_at"),
+            fallback_title=existing_post.get("title", ""),
+        )
+        if record:
+            posts_by_tid[tid] = record
+
     if skipped_not_found:
         print(f"skipped {skipped_not_found} unavailable thread(s) that returned HTTP 404")
     return list(posts_by_tid.values())
@@ -445,7 +628,13 @@ def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> 
 def merge_posts(existing: list[dict[str, Any]], new_posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged = {str(post["id"]): post for post in existing}
     for post in new_posts:
-        merged.setdefault(str(post["id"]), post)
+        tid = str(post["id"])
+        if tid not in merged:
+            merged[tid] = post
+            continue
+        if post.get("content_format_version") == POST_CONTENT_VERSION:
+            merged[tid]["content_html"] = post["content_html"]
+            merged[tid]["content_format_version"] = POST_CONTENT_VERSION
     return sorted(merged.values(), key=lambda x: x.get("published_at", "1970-01-01T00:00:00+00:00"), reverse=True)
 
 
@@ -461,7 +650,10 @@ def main() -> None:
     new_posts = crawl_forum(limit_pages=page_limit, existing_ids=existing_ids)
     posts = merge_posts(existing_posts, new_posts)
     save_posts(posts)
-    print(f"saved {len(posts)} posts (scanned {page_limit} page(s))")
+    upgraded_count = sum(
+        1 for post in new_posts if str(post["id"]) in existing_ids
+    )
+    print(f"saved {len(posts)} posts (scanned {page_limit} page(s), refreshed {upgraded_count} archived post(s))")
 
 
 if __name__ == "__main__":

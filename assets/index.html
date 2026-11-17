@@ -14,6 +14,7 @@
         <a class="wordmark" href="./" aria-label="倒霉日记，返回首页">倒霉日记</a>
         <nav class="site-nav" aria-label="主导航">
           <a href="#entries">日记</a>
+          <a href="./guestbook.html">留言</a>
           <a href="https://about.ikl.ink/" target="_blank" rel="noreferrer">关于</a>
         </nav>
       </div>
@@ -46,9 +47,13 @@
           <div class="entry-body">
             <h3><a href="{{ post.source_url }}" target="_blank" rel="noreferrer">{{ post.title }}</a></h3>
             <div class="post-content">
+              {% if post.content_html %}
+              {{ post.content_html | safe }}
+              {% else %}
               {% for paragraph in post.content.split('\n\n') %}
               <p>{{ paragraph }}</p>
               {% endfor %}
+              {% endif %}
             </div>
             <a class="source-link" href="{{ post.source_url }}" target="_blank" rel="noreferrer">查看论坛原帖 <span aria-hidden="true">↗</span></a>
           </div>
@@ -61,29 +66,6 @@
         {% endfor %}
       </section>
 
-      <section class="comments" aria-labelledby="comments-title">
-        <div class="section-heading">
-          <h2 id="comments-title">留个言</h2>
-          <p>欢迎聊聊，也请友善交流</p>
-        </div>
-        <div class="comments-frame">
-          <script src="https://giscus.app/client.js"
-            data-repo="DsTansice/LuckyDiary"
-            data-repo-id="R_kgDOVx2RUw"
-            data-category="General"
-            data-category-id="DIC_kwDOVx2RU84DLWQr"
-            data-mapping="pathname"
-            data-strict="1"
-            data-reactions-enabled="1"
-            data-emit-metadata="0"
-            data-input-position="top"
-            data-theme="light"
-            data-lang="zh-CN"
-            crossorigin="anonymous"
-            async>
-          </script>
-        </div>
-      </section>
     </main>
 
     <footer class="site-footer">

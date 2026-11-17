@@ -1,11 +1,14 @@
 import contextlib
 import io
 import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
+from bs4 import BeautifulSoup
 import scraper
 
 
@@ -169,6 +172,90 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertNotIn("本主题由", content)
         self.assertNotIn("回复内容", content)
         self.assertEqual(scraper.parse_post_date(html), "2026-11-17T16:00:41+08:00")
+
+    def test_post_html_preserves_formatting_and_removes_unsafe_markup(self):
+        html = """
+          <h1 id="thread_subject">格式测试</h1>
+          <div id="postlist">
+            <div class="comiis_vpost" id="post_1">
+              <em id="authorposton1"><span title="2026-11-17 16:00:41"></span></em>
+              <div class="t_f">
+                第一行<br><br><strong style="color: red; background-image: url(javascript:bad)">加粗</strong>
+                <a href="javascript:alert(1)" onclick="alert(1)">危险链接</a>
+                <img src="https://forum.naixi.net/image.jpg" onerror="alert(1)" alt="图片">
+              </div>
+            </div>
+          </div>
+        """
+        title, text, body_html = scraper.parse_post_html(html)
+
+        self.assertEqual(title, "格式测试")
+        self.assertIn("第一行<br/><br/>", body_html)
+        self.assertIn("<strong style=\"color: red\">加粗</strong>", body_html)
+        self.assertNotIn("javascript:", body_html)
+        self.assertNotIn("onclick", body_html)
+        self.assertNotIn("onerror", body_html)
+        self.assertIn("危险链接", text)
+
+    def test_post_images_are_saved_locally_and_rewritten(self):
+        response = Mock(
+            status_code=200,
+            headers={"Content-Type": "image/jpeg"},
+            content=b"fake-image",
+        )
+        session = Mock()
+        session.get.return_value = response
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(scraper, "IMAGE_DIR", Path(temp_dir)):
+                html = scraper.download_post_images(
+                    '<p>图 <img src="/attachments/photo.jpg" alt="照片"></p>',
+                    "16530",
+                    session,
+                    "https://forum.naixi.net/thread-16530-1-1.html",
+                )
+                image_url = BeautifulSoup(html, "html.parser").img["src"]
+                saved_image = Path(temp_dir) / "16530" / Path(image_url).name
+
+            self.assertTrue(image_url.startswith("images/16530/"))
+            self.assertEqual(saved_image.read_bytes(), b"fake-image")
+        session.get.assert_called_once_with(
+            "https://forum.naixi.net/attachments/photo.jpg",
+            timeout=30,
+            allow_redirects=True,
+        )
+
+    def test_crawl_refreshes_legacy_post_html_without_changing_archive_metadata(self):
+        session = Mock()
+        thread_html = """
+          <h1 id="thread_subject">论坛新标题</h1>
+          <div id="postlist">
+            <div class="comiis_vpost" id="post_1">
+              <em id="authorposton1"><span title="2026-11-17 16:00:41"></span></em>
+              <div class="t_f">修复后的正文<br>第二行</div>
+            </div>
+          </div>
+        """
+        legacy = {
+            "id": "16529",
+            "source_url": "https://forum.naixi.net/thread-16529-1-1.html",
+            "title": "归档原始标题",
+            "published_at": "2026-11-17T16:00:41+08:00",
+            "content": "旧的纯文本",
+            "content_html": "旧的整页文本",
+        }
+        with (
+            patch.object(scraper, "build_session", return_value=session),
+            patch.object(scraper, "load_existing", return_value={"posts": [legacy]}),
+            patch.object(scraper, "fetch_posts_for_page", return_value=[]),
+            patch.object(scraper, "fetch_page", return_value=thread_html),
+        ):
+            updates = scraper.crawl_forum(limit_pages=1, existing_ids={"16529"})
+
+        merged = scraper.merge_posts([legacy], updates)[0]
+        self.assertIn("修复后的正文<br/>第二行", merged["content_html"])
+        self.assertEqual(merged["title"], "归档原始标题")
+        self.assertEqual(merged["published_at"], legacy["published_at"])
+        self.assertEqual(merged["content"], "旧的纯文本")
 
     def test_post_content_requires_a_real_body_instead_of_scraping_controls(self):
         html = """

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -35,8 +36,16 @@ def render() -> None:
         template.render(posts=posts, post_count=len(posts), site_title="倒霉鬼的倒霉日记"),
         encoding="utf-8",
     )
+    guestbook_template = env.get_template("guestbook.html")
+    (OUT_DIR / "guestbook.html").write_text(
+        guestbook_template.render(site_title="倒霉鬼的倒霉日记"),
+        encoding="utf-8",
+    )
     (OUT_DIR / "styles.css").write_text((TEMPLATE_DIR / "styles.css").read_text(encoding="utf-8"), encoding="utf-8")
     (OUT_DIR / "app.js").write_text((TEMPLATE_DIR / "app.js").read_text(encoding="utf-8"), encoding="utf-8")
+    image_dir = ROOT / "data" / "images"
+    if image_dir.exists():
+        shutil.copytree(image_dir, OUT_DIR / "images", dirs_exist_ok=True)
 
 
 if __name__ == "__main__":

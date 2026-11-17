@@ -10,10 +10,10 @@
 4. 打开 **Actions → Update forum diary → Run workflow** 手动同步。Workflow 会将 Secrets 作为环境变量传给抓取步骤，先读取论坛动态登录表单，再执行登录。脚本只复用登录后的会话来抓帖子，不会执行 HAR 中的签到请求。
 5. 也可以不配置账号密码，改为配置 `FORUM_COOKIE` Secret，作为登录 Cookie 的回退方式。
 
-首次同步（存档为空）会按 `order=dateline` 扫描个人帖子列表前 10 页；首次成功后，后续增量同步只扫描第一页。列表页 `#threadlisttableid` 是 `<ul>`，每篇帖子是一项 `li.kmlist.common`，只从其中的 `a.kmtit` 读取帖子 URL 和标题，不扫描其它链接。正文和原始发布时间从帖子页 `#postlist` 的首帖提取；正文提取会排除论坛操作控件和管理提示，并按段落展示。对“昨天 17:48”“13 分钟前”等相对时间，脚本按香港时区换算；页面提供绝对时间时优先使用绝对时间。只抓取尚未存档的帖子；已有存档内容保持不变。临时连接中断或响应分块不完整时，每个页面请求最多重试 2 次；若仍失败则报错。若列表中的旧帖详情页返回 HTTP 404，会输出 warning 并跳过该帖，继续处理其它帖子；其它 HTTP 错误仍会让任务失败。列表和帖子页都无法读取原始时间时，任务会报错而不是用抓取时间替代。
+首次同步（存档为空）会按 `order=dateline` 扫描个人帖子列表前 10 页；首次成功后，后续增量同步只扫描第一页。列表页 `#threadlisttableid` 是 `<ul>`，每篇帖子是一项 `li.kmlist.common`，只从其中的 `a.kmtit` 读取帖子 URL 和标题，不扫描其它链接。正文和原始发布时间从帖子页 `#postlist` 的首帖提取；正文以清理过的原始 HTML 归档，保留换行、段落、常见文字格式和图片，论坛操作控件与编辑/移动提示不会写入。帖子图片会下载到 `data/images/`，静态站构建时复制到 `dist/images/`。旧归档会逐步补抓一次富文本和图片；原有标题、发帖时间与纯文本归档保持不变。对“昨天 17:48”“13 分钟前”等相对时间，脚本按香港时区换算；页面提供绝对时间时优先使用绝对时间。评论区在独立的 `guestbook.html` 页面。临时连接中断或响应分块不完整时，每个页面请求最多重试 2 次；若仍失败则报错。若列表中的旧帖详情页返回 HTTP 404，会输出 warning 并跳过该帖，继续处理其它帖子；其它 HTTP 错误仍会让任务失败。列表和帖子页都无法读取原始时间时，任务会报错而不是用抓取时间替代。
 
 ## 发布网站
 
 将 Cloudflare Pages 连接到此 GitHub 仓库，构建输出目录设为 `dist`。Actions 有新归档时会提交 `data/posts.json` 和生成后的静态文件，Git 集成随后会触发重新部署。
 
-评论区使用 Giscus。部署前在 `assets/index.html` 中把 `data-repo`、`data-repo-id`、`data-category` 和 `data-category-id` 替换为已启用 Discussions 的 GitHub 仓库对应值。
+留言页使用 Giscus。部署前在 `assets/guestbook.html` 中把 `data-repo`、`data-repo-id`、`data-category` 和 `data-category-id` 替换为已启用 Discussions 的 GitHub 仓库对应值。

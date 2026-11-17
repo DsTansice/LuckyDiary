@@ -214,17 +214,47 @@ a {
   font-family: var(--serif);
   font-size: 15px;
   line-height: 2;
-  text-wrap: pretty;
   overflow-wrap: anywhere;
 }
 
-.post-content p {
-  margin: 0;
-  white-space: pre-wrap;
+.post-content p,
+.post-content div,
+.post-content blockquote,
+.post-content pre {
+  max-width: 100%;
 }
 
-.post-content p + p {
-  margin-top: 1.1em;
+.post-content img {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+  vertical-align: middle;
+}
+
+.post-content a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.post-content blockquote {
+  margin: 1em 0;
+  padding: 0.1em 1em;
+  border-left: 2px solid var(--rule);
+  color: var(--muted);
+}
+
+.post-content pre,
+.post-content table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.guestbook-intro {
+  min-height: 260px;
+}
+
+.guestbook-comments {
+  padding: 32px 0;
 }
 
 .source-link {
@@ -256,20 +286,6 @@ a {
   color: var(--ink);
   font-family: var(--serif);
   font-size: 22px;
-}
-
-.comments {
-  margin-top: 40px;
-  padding-top: 4px;
-  border-top: 1px solid var(--rule);
-}
-
-.comments .section-heading {
-  padding-top: 30px;
-}
-
-.comments-frame {
-  min-height: 100px;
 }
 
 .site-footer {
