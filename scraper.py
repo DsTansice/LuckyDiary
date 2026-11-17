@@ -181,27 +181,33 @@ def is_login_required(html: str) -> bool:
 
 def parse_thread_list(html: str) -> list[dict[str, str]]:
     soup = BeautifulSoup(html, "html.parser")
+    thread_table = soup.select_one("#threadlisttableid")
+    if thread_table is None:
+        return []
+
     items: list[dict[str, str]] = []
-    for a in soup.select("a[href*='tid='], a[href*='mod=viewthread'], a[href*='thread-']"):
-        href = a.get("href", "")
-        if not href:
+    for row in thread_table.select("tr"):
+        topic_link = row.select_one("th.common a.xst[href], a.xst[href]")
+        if topic_link is None:
+            topic_link = next(
+                (
+                    link
+                    for link in row.select("a[href]")
+                    if parse_tid(link.get("href", "")) is not None
+                ),
+                None,
+            )
+        if topic_link is None:
             continue
-        text = " ".join(a.get_text(" ", strip=True).split())
-        if not text:
-            continue
+
+        href = topic_link.get("href", "")
         tid = parse_tid(href)
-        if not tid:
+        title = " ".join(topic_link.get_text(" ", strip=True).split())
+        if not tid or not title:
             continue
-        published_at = None
-        node = a
-        for _ in range(5):
-            if node is None:
-                break
-            published_at = parse_post_date(str(node))
-            if published_at:
-                break
-            node = node.parent
-        item = {"tid": tid, "title": text, "href": normalize_url(href)}
+
+        published_at = parse_post_date(str(row))
+        item = {"tid": tid, "title": title, "href": normalize_url(href)}
         if published_at:
             item["published_at"] = published_at
         items.append(item)
@@ -295,7 +301,7 @@ def fetch_posts_for_page(session: requests.Session, page_num: int) -> list[dict[
         soup = BeautifulSoup(page_html, "html.parser")
         page_title = soup.title.get_text(" ", strip=True) if soup.title else "(no page title)"
         raise RuntimeError(
-            "no thread links were found on the first profile page "
+            "no thread rows were found in #threadlisttableid on the first profile page "
             f"(response title: {page_title!r}); authentication may have failed or the forum's thread-link "
             "format may have changed"
         )

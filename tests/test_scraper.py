@@ -20,7 +20,13 @@ class LoginDetectionTests(unittest.TestCase):
     def test_rewritten_thread_urls_are_parsed(self):
         self.assertEqual(scraper.parse_tid("https://forum.naixi.net/thread-12345-1-1.html"), "12345")
         items = scraper.parse_thread_list(
-            '<a href="thread-12345-1-1.html">测试帖子</a>'
+            """
+            <table id="threadlisttableid">
+              <tr id="normalthread_12345">
+                <th class="common"><a class="xst" href="thread-12345-1-1.html">测试帖子</a></th>
+              </tr>
+            </table>
+            """
         )
         self.assertEqual(items[0]["tid"], "12345")
 
@@ -39,21 +45,51 @@ class LoginDetectionTests(unittest.TestCase):
 
     def test_thread_list_entry_date_is_extracted(self):
         html = """
-          <div class="thread">
-            <a href="forum.php?mod=viewthread&tid=12345">测试帖子</a>
-            <span>发表于 2026-11-17 22:30:45</span>
-          </div>
+          <table id="threadlisttableid">
+            <tbody>
+              <tr id="normalthread_12345">
+                <th class="common"><a class="xst" href="thread-12345-1-1.html">测试帖子</a></th>
+                <td class="by"><em><span title="2026-11-17 22:30:45">2026-11-17</span></em></td>
+              </tr>
+            </tbody>
+          </table>
         """
         item = scraper.parse_thread_list(html)[0]
         self.assertEqual(item["published_at"], "2026-11-17T22:30:45+08:00")
 
     def test_thread_list_keeps_pretty_thread_url(self):
         items = scraper.parse_thread_list(
-            '<a href="https://forum.naixi.net/thread-16529-1-1.html">测试帖子</a>'
+            """
+            <table id="threadlisttableid">
+              <tr id="normalthread_16529">
+                <th class="common"><a class="xst" href="https://forum.naixi.net/thread-16529-1-1.html">测试帖子</a></th>
+              </tr>
+            </table>
+            """
         )
         self.assertEqual(
             items[0]["href"],
             "https://forum.naixi.net/thread-16529-1-1.html",
+        )
+
+    def test_only_topics_inside_threadlisttableid_are_returned(self):
+        html = """
+          <a href="thread-7706-1-1.html">侧栏旧帖，不是列表文章</a>
+          <table id="threadlisttableid">
+            <tr id="normalthread_16530">
+              <th class="common"><a class="xst" href="thread-16530-1-1.html">列表里的帖子</a></th>
+            </tr>
+          </table>
+        """
+        items = scraper.parse_thread_list(html)
+        self.assertEqual([item["tid"] for item in items], ["16530"])
+        self.assertEqual(items[0]["title"], "列表里的帖子")
+        self.assertEqual(items[0]["href"], "https://forum.naixi.net/thread-16530-1-1.html")
+
+    def test_missing_threadlisttableid_returns_no_items(self):
+        self.assertEqual(
+            scraper.parse_thread_list('<a href="thread-7706-1-1.html">其他链接</a>'),
+            [],
         )
 
     def test_postlist_extracts_original_post_content_and_exact_time(self):
