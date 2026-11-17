@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urljoin, urlsplit, urlunsplit
@@ -18,6 +18,7 @@ PROFILE_PATH = "/home.php?mod=space&uid=4328&do=thread&view=me&order=dateline&fr
 LOGIN_URL = f"{BASE_URL}/member.php"
 DATA_PATH = Path(__file__).resolve().parent / "data" / "posts.json"
 MAX_FETCH_ATTEMPTS = 3
+HONG_KONG_TZ = timezone(timedelta(hours=8))
 
 
 def load_existing() -> dict[str, Any]:
@@ -227,7 +228,7 @@ def parse_thread_list(html: str) -> list[dict[str, str]]:
     return list(unique.values())
 
 
-def parse_post_date(html: str) -> str | None:
+def parse_post_date(html: str, now: datetime | None = None) -> str | None:
     soup = BeautifulSoup(html, "html.parser")
     postlist = soup.select_one("#postlist, .postlist")
     first_post = None
@@ -241,6 +242,10 @@ def parse_post_date(html: str) -> str | None:
             parsed = parse_absolute_date(value)
             if parsed:
                 return parsed
+    for date_node in date_scope.select("em[id^='authorposton'] span, time"):
+        parsed = parse_relative_date(date_node.get_text(" ", strip=True), now=now)
+        if parsed:
+            return parsed
 
     patterns = [
         r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?[ T]\d{1,2}:\d{2}:\d{2})",
@@ -270,6 +275,49 @@ def parse_absolute_date(value: str) -> str | None:
     return None
 
 
+def parse_relative_date(value: str, now: datetime | None = None) -> str | None:
+    value = " ".join(value.strip().split())
+    current = now or datetime.now(HONG_KONG_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=HONG_KONG_TZ)
+    else:
+        current = current.astimezone(HONG_KONG_TZ)
+
+    relative_match = re.fullmatch(r"(\d+)\s*(秒|分钟|分|小时|天)前", value)
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2)
+        delta = {
+            "秒": timedelta(seconds=amount),
+            "分钟": timedelta(minutes=amount),
+            "分": timedelta(minutes=amount),
+            "小时": timedelta(hours=amount),
+            "天": timedelta(days=amount),
+        }[unit]
+        return (current - delta).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    if value == "刚刚":
+        return current.replace(second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+    day_match = re.fullmatch(r"(今天|昨天|前天)\s+(\d{1,2}):(\d{2})(?::(\d{2}))?", value)
+    if day_match:
+        days_ago = {"今天": 0, "昨天": 1, "前天": 2}[day_match.group(1)]
+        date_value = (current - timedelta(days=days_ago)).date()
+        try:
+            parsed = datetime(
+                date_value.year,
+                date_value.month,
+                date_value.day,
+                int(day_match.group(2)),
+                int(day_match.group(3)),
+                int(day_match.group(4) or "0"),
+                tzinfo=HONG_KONG_TZ,
+            )
+        except ValueError:
+            return None
+        return parsed.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    return None
+
+
 def parse_post_content(html: str) -> tuple[str, str]:
     soup = BeautifulSoup(html, "html.parser")
     title_node = soup.select_one("#thread_subject")
@@ -282,17 +330,35 @@ def parse_post_content(html: str) -> tuple[str, str]:
     if postlist is not None:
         first_post = postlist.select_one("div.comiis_vpost[id^='post_'], div[id^='post_']")
 
-    scope = first_post or postlist or soup
+    if first_post is None:
+        raise RuntimeError("could not find the original post container in #postlist")
+    scope = first_post
     content = scope.select_one(".t_f, .t_fsz, .postcontent, .t_msgfont")
     if content is None:
         content = scope.select_one(".pcb")
     if content is None:
-        content = scope
+        raise RuntimeError("could not find the original post body in #postlist")
 
-    for unwanted in content.select(".attach_tips, .pstatus"):
+    body = BeautifulSoup(str(content), "html.parser")
+    for unwanted in body.select(
+        ".attach_tips, .pstatus, .kmbtn, .pob, .po, .fastre, .replysubmit, "
+        "button, input, textarea, select, script, style"
+    ):
         unwanted.decompose()
-    text = content.get_text("\n", strip=True)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    body_node = body.find()
+    if body_node is None:
+        raise RuntimeError("could not parse the original post body")
+    for line_break in body_node.select("br"):
+        line_break.replace_with("\n")
+    for block in body_node.select("p, div, li, blockquote, pre"):
+        block.insert_before("\n")
+        block.insert_after("\n")
+    text = body_node.get_text(" ", strip=True)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"(?m)^\s*本主题由.*?移动\s*$", "", text).strip()
+    if not text:
+        raise RuntimeError("the original post body is empty after removing forum controls")
     return title, text
 
 

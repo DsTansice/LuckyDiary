@@ -209,12 +209,22 @@ a {
 }
 
 .post-content {
+  max-width: 720px;
   color: #514d45;
   font-family: var(--serif);
   font-size: 15px;
-  line-height: 1.95;
-  white-space: pre-wrap;
+  line-height: 2;
+  text-wrap: pretty;
   overflow-wrap: anywhere;
+}
+
+.post-content p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.post-content p + p {
+  margin-top: 1.1em;
 }
 
 .source-link {

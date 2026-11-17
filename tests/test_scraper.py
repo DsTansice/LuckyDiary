@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import requests
@@ -139,6 +140,7 @@ class LoginDetectionTests(unittest.TestCase):
     def test_postlist_extracts_original_post_content_and_exact_time(self):
         html = """
           <h1 id="thread_subject">示例标题</h1>
+          <div class="notice">本主题由 管理团队 于 2026-5-13 20:34 移动</div>
           <div id="postlist" class="pl comiis_postlist">
             <div id="post_100" class="comiis_vpost comiis_vone">
               <div class="authi">
@@ -151,6 +153,7 @@ class LoginDetectionTests(unittest.TestCase):
                 <i class="pstatus">最后编辑 2026-11-17 16:03</i>
                 原帖正文
               </td>
+              <button class="kmbtn">快速回复</button>
             </div>
             <div id="post_101" class="comiis_vpost">
               <em id="authorposton101"><span title="2026-11-17 16:06:00">稍后</span></em>
@@ -162,8 +165,21 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertEqual(title, "示例标题")
         self.assertIn("原帖正文", content)
         self.assertNotIn("登录后下载", content)
+        self.assertNotIn("快速回复", content)
+        self.assertNotIn("本主题由", content)
         self.assertNotIn("回复内容", content)
         self.assertEqual(scraper.parse_post_date(html), "2026-11-17T16:00:41+08:00")
+
+    def test_post_content_requires_a_real_body_instead_of_scraping_controls(self):
+        html = """
+          <div id="postlist">
+            <div id="post_1" class="comiis_vpost">
+              <button class="kmbtn">快速回复</button>
+            </div>
+          </div>
+        """
+        with self.assertRaisesRegex(RuntimeError, "original post body"):
+            scraper.parse_post_content(html)
 
     def test_slash_and_chinese_date_formats_are_parsed(self):
         self.assertEqual(
@@ -173,6 +189,34 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertEqual(
             scraper.parse_post_date("2026年11月17日 22:30"),
             "2026-11-17T22:30:00+08:00",
+        )
+
+    def test_relative_post_dates_use_hong_kong_time(self):
+        fixed_now = datetime(2026, 11, 18, 0, 20, tzinfo=timezone.utc)
+        yesterday = """
+          <div id="postlist">
+            <div class="comiis_vpost" id="post_1">
+              <em id="authorposton1"><span>昨天 17:48</span></em>
+              <div class="t_f">正文</div>
+            </div>
+          </div>
+        """
+        minutes_ago = """
+          <div id="postlist">
+            <div class="comiis_vpost" id="post_1">
+              <em id="authorposton1"><span>13 分钟前</span></em>
+              <div class="t_f">正文</div>
+            </div>
+          </div>
+        """
+
+        self.assertEqual(
+            scraper.parse_post_date(yesterday, now=fixed_now),
+            "2026-11-17T17:48:00+08:00",
+        )
+        self.assertEqual(
+            scraper.parse_post_date(minutes_ago, now=fixed_now),
+            "2026-11-18T08:07:00+08:00",
         )
 
     def test_discuz_login_form_is_detected(self):

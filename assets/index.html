@@ -45,7 +45,11 @@
           </div>
           <div class="entry-body">
             <h3><a href="{{ post.source_url }}" target="_blank" rel="noreferrer">{{ post.title }}</a></h3>
-            <div class="post-content">{{ post.content }}</div>
+            <div class="post-content">
+              {% for paragraph in post.content.split('\n\n') %}
+              <p>{{ paragraph }}</p>
+              {% endfor %}
+            </div>
             <a class="source-link" href="{{ post.source_url }}" target="_blank" rel="noreferrer">查看论坛原帖 <span aria-hidden="true">↗</span></a>
           </div>
         </article>
