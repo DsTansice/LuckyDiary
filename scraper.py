@@ -311,6 +311,7 @@ def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> 
     session = build_session()
     existing_ids = existing_ids or set()
     posts_by_tid: dict[str, dict[str, Any]] = {}
+    skipped_not_found = 0
     for page in range(1, limit_pages + 1):
         items = fetch_posts_for_page(session, page)
         if not items:
@@ -320,7 +321,14 @@ def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> 
             if tid in posts_by_tid or tid in existing_ids:
                 continue
             thread_url = item["href"]
-            thread_html = fetch_page(session, thread_url)
+            try:
+                thread_html = fetch_page(session, thread_url)
+            except requests.HTTPError as error:
+                if error.response is None or error.response.status_code != 404:
+                    raise
+                skipped_not_found += 1
+                print(f"warning: skipping unavailable forum thread {tid} (HTTP 404): {thread_url}")
+                continue
             if is_login_required(thread_html):
                 raise RuntimeError(
                     f"forum thread {tid} returned a login-required/permission page; "
@@ -349,6 +357,8 @@ def crawl_forum(limit_pages: int = 10, existing_ids: set[str] | None = None) -> 
                 "content": text,
                 "content_html": BeautifulSoup(thread_html, "html.parser").get_text("\n", strip=True),
             }
+    if skipped_not_found:
+        print(f"skipped {skipped_not_found} unavailable thread(s) that returned HTTP 404")
     return list(posts_by_tid.values())
 
 

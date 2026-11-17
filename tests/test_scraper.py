@@ -1,7 +1,10 @@
+import contextlib
+import io
 import os
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
 import scraper
 
 
@@ -21,11 +24,11 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertEqual(scraper.parse_tid("https://forum.naixi.net/thread-12345-1-1.html"), "12345")
         items = scraper.parse_thread_list(
             """
-            <table id="threadlisttableid">
-              <tr id="normalthread_12345">
-                <th class="common"><a class="xst" href="thread-12345-1-1.html">测试帖子</a></th>
-              </tr>
-            </table>
+            <ul id="threadlisttableid">
+              <li class="kmlist common">
+                <a class="kmtit" href="thread-12345-1-1.html">测试帖子</a>
+              </li>
+            </ul>
             """
         )
         self.assertEqual(items[0]["tid"], "12345")
@@ -45,14 +48,12 @@ class LoginDetectionTests(unittest.TestCase):
 
     def test_thread_list_entry_date_is_extracted(self):
         html = """
-          <table id="threadlisttableid">
-            <tbody>
-              <tr id="normalthread_12345">
-                <th class="common"><a class="xst" href="thread-12345-1-1.html">测试帖子</a></th>
-                <td class="by"><em><span title="2026-11-17 22:30:45">2026-11-17</span></em></td>
-              </tr>
-            </tbody>
-          </table>
+          <ul id="threadlisttableid">
+            <li class="kmlist common">
+              <a class="kmtit" href="thread-12345-1-1.html">测试帖子</a>
+              <span title="2026-11-17 22:30:45">发表于 2026-11-17 22:30:45</span>
+            </li>
+          </ul>
         """
         item = scraper.parse_thread_list(html)[0]
         self.assertEqual(item["published_at"], "2026-11-17T22:30:45+08:00")
@@ -60,11 +61,11 @@ class LoginDetectionTests(unittest.TestCase):
     def test_thread_list_keeps_pretty_thread_url(self):
         items = scraper.parse_thread_list(
             """
-            <table id="threadlisttableid">
-              <tr id="normalthread_16529">
-                <th class="common"><a class="xst" href="https://forum.naixi.net/thread-16529-1-1.html">测试帖子</a></th>
-              </tr>
-            </table>
+            <ul id="threadlisttableid">
+              <li class="kmlist common">
+                <a class="kmtit" href="https://forum.naixi.net/thread-16529-1-1.html">测试帖子</a>
+              </li>
+            </ul>
             """
         )
         self.assertEqual(
@@ -75,11 +76,14 @@ class LoginDetectionTests(unittest.TestCase):
     def test_only_topics_inside_threadlisttableid_are_returned(self):
         html = """
           <a href="thread-7706-1-1.html">侧栏旧帖，不是列表文章</a>
-          <table id="threadlisttableid">
-            <tr id="normalthread_16530">
-              <th class="common"><a class="xst" href="thread-16530-1-1.html">列表里的帖子</a></th>
-            </tr>
-          </table>
+          <ul id="threadlisttableid">
+            <li class="kmlist common">
+              <a href="thread-7706-1-1.html" class="showcontent">更多操作</a>
+              <a href="thread-16530-1-1.html" class="kmtit">列表里的帖子</a>
+              <a href="space-uid-4328.html">作者</a>
+              <a href="forum-84-1.html">版块</a>
+            </li>
+          </ul>
         """
         items = scraper.parse_thread_list(html)
         self.assertEqual([item["tid"] for item in items], ["16530"])
@@ -91,6 +95,21 @@ class LoginDetectionTests(unittest.TestCase):
             scraper.parse_thread_list('<a href="thread-7706-1-1.html">其他链接</a>'),
             [],
         )
+
+    def test_thread_links_are_extracted_from_table_without_tr_rows(self):
+        html = """
+          <div id="threadlisttableid">
+            <li class="kmlist common">
+              <a class="kmtit" href="thread-16530-1-1.html">列表里的帖子</a>
+              <span title="2026-11-17 22:30:45">刚刚</span>
+            </li>
+          </div>
+        """
+        items = scraper.parse_thread_list(html)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["tid"], "16530")
+        self.assertEqual(items[0]["title"], "列表里的帖子")
+        self.assertEqual(items[0]["published_at"], "2026-11-17T22:30:45+08:00")
 
     def test_postlist_extracts_original_post_content_and_exact_time(self):
         html = """
@@ -247,6 +266,54 @@ class LoginDetectionTests(unittest.TestCase):
         ):
             session = scraper.build_session()
         self.assertEqual(session.headers["Cookie"], "sid=sample")
+
+    def test_crawl_skips_deleted_thread_404_and_continues(self):
+        session = Mock()
+        missing_response = Mock(status_code=404)
+        not_found = requests.HTTPError("404 not found", response=missing_response)
+        working_thread_html = """
+          <h1 id="thread_subject">可访问帖子</h1>
+          <div id="postlist">
+            <div id="post_1" class="comiis_vpost">
+              <em id="authorposton1"><span title="2026-11-17 16:00:41"></span></em>
+              <td class="t_f">正文</td>
+            </div>
+          </div>
+        """
+        with (
+            patch.object(scraper, "build_session", return_value=session),
+            patch.object(
+                scraper,
+                "fetch_posts_for_page",
+                return_value=[
+                    {"tid": "7706", "title": "已失效帖子", "href": "https://forum.naixi.net/thread-7706-1-1.html"},
+                    {"tid": "16529", "title": "可访问帖子", "href": "https://forum.naixi.net/thread-16529-1-1.html"},
+                ],
+            ),
+            patch.object(scraper, "fetch_page", side_effect=[not_found, working_thread_html]),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            posts = scraper.crawl_forum(limit_pages=1)
+
+        self.assertEqual([post["id"] for post in posts], ["16529"])
+        self.assertIn("skipping unavailable forum thread 7706", output.getvalue())
+
+    def test_crawl_propagates_non_404_http_errors(self):
+        session = Mock()
+        server_error = requests.HTTPError("500 server error", response=Mock(status_code=500))
+        with (
+            patch.object(scraper, "build_session", return_value=session),
+            patch.object(
+                scraper,
+                "fetch_posts_for_page",
+                return_value=[
+                    {"tid": "16529", "title": "测试", "href": "https://forum.naixi.net/thread-16529-1-1.html"},
+                ],
+            ),
+            patch.object(scraper, "fetch_page", side_effect=server_error),
+            self.assertRaises(requests.HTTPError),
+        ):
+            scraper.crawl_forum(limit_pages=1)
 
 
 if __name__ == "__main__":
